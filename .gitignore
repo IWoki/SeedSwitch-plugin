@@ -1,0 +1,22 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+out/
+
+# OS-specific мусор
+.DS_Store
+Thumbs.db
+
+# Логи
+*.log
+
+# Тестовый сервер (создаётся автоматически при runServer)
+run/

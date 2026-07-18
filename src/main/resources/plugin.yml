@@ -1,0 +1,10 @@
+name: seedswitch
+version: '${version}'
+main: com.imwoki.seedswitch.Seedswitch
+api-version: '1.21.10'
+load: POSTWORLD
+
+commands:
+  seedswitch:
+    description: Телепортирует тебя в новый мир со случайным сидом
+    usage: /seedswitch
