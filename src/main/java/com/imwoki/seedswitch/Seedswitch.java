@@ -1,6 +1,7 @@
 package com.imwoki.seedswitch;
 
 import net.kyori.adventure.text.Component;
+import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.WorldCreator;
@@ -10,18 +11,25 @@ import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
 
+import java.io.File;
 import java.util.Random;
 
 public final class Seedswitch extends JavaPlugin {
 
-    // Один общий интервал на весь сервер (в секундах). 0 = таймер выключен.
     private int globalIntervalSeconds = 0;
-    // Сколько секунд осталось до следующей смены мира
     private int globalCountdown = 0;
+
+    // Мир, в котором игроки находятся ПРЯМО СЕЙЧАС
+    private World currentWorld;
+
+    // Мир, который мы готовим ЗАРАНЕЕ для следующей смены
+    private World pendingNextWorld;
 
     @Override
     public void onEnable() {
         getLogger().info("SeedSwitch enabled!");
+        // Мир по умолчанию (тот, что создаётся при первом запуске сервера) считаем стартовым
+        currentWorld = getServer().getWorlds().get(0);
         startGlobalTicker();
     }
 
@@ -30,27 +38,41 @@ public final class Seedswitch extends JavaPlugin {
         getLogger().info("SeedSwitch disabled.");
     }
 
-    // Тикает раз в секунду, пока сервер работает
     private void startGlobalTicker() {
         new BukkitRunnable() {
             @Override
             public void run() {
-                if (globalIntervalSeconds <= 0) return; // таймер выключен — ничего не делаем
+                if (globalIntervalSeconds <= 0) return;
+
+                // Готовим следующий мир заранее, пока есть время до смены
+                // (например, за 5 секунд до нуля — этого обычно хватает на генерацию)
+                if (globalCountdown == 5 && pendingNextWorld == null) {
+                    pregenerateNextWorld();
+                }
 
                 globalCountdown--;
 
                 if (globalCountdown <= 0) {
                     switchAllPlayers();
-                    globalCountdown = globalIntervalSeconds; // сбрасываем отсчёт заново
+                    globalCountdown = globalIntervalSeconds;
                 }
 
-                // Показываем обратный отсчёт всем игроками одновременно
                 Component actionBarText = Component.text("Смена мира через: " + globalCountdown + "с");
                 for (Player p : getServer().getOnlinePlayers()) {
                     p.sendActionBar(actionBarText);
                 }
             }
-        }.runTaskTimer(this, 0L, 20L); // 20 тиков = 1 секунда
+        }.runTaskTimer(this, 0L, 20L);
+    }
+
+    // Генерирует новый мир ЗАРАНЕЕ и складывает его "про запас"
+    private void pregenerateNextWorld() {
+        long newSeed = new Random().nextLong();
+        String worldName = "seedswitch_" + System.currentTimeMillis();
+
+        WorldCreator creator = new WorldCreator(worldName);
+        creator.seed(newSeed);
+        pendingNextWorld = creator.createWorld();
     }
 
     @Override
@@ -58,14 +80,14 @@ public final class Seedswitch extends JavaPlugin {
         if (args.length == 2 && args[0].equalsIgnoreCase("settimer")) {
             try {
                 int seconds = Integer.parseInt(args[1]);
-                if (seconds < 10) {
-                    sender.sendMessage("Минимальный интервал — 10 секунд.");
+                if (seconds < 30) {
+                    sender.sendMessage("Минимальный интервал — 30 секунд.");
                     return true;
                 }
                 globalIntervalSeconds = seconds;
                 globalCountdown = seconds;
                 getServer().broadcast(Component.text(
-                        "Таймер смены мира установлен: каждые " + seconds + " Удачи."));
+                        "Таймер смены мира установлен: каждые " + seconds + " секунд. Удачи."));
             } catch (NumberFormatException e) {
                 sender.sendMessage("Нужно указать число секунд. Пример: /seedswitch settimer 60");
             }
@@ -82,14 +104,15 @@ public final class Seedswitch extends JavaPlugin {
         return true;
     }
 
-    // Создаёт ОДИН новый мир и переносит туда ВСЕХ онлайн-игроков
     private void switchAllPlayers() {
-        long newSeed = new Random().nextLong();
-        String worldName = "seedswitch_" + System.currentTimeMillis();
+        // На всякий случай: если по какой-то причине мир не успел подготовиться заранее —
+        // генерируем прямо сейчас (это и есть тот самый редкий случай лага, но он подстраховка)
+        if (pendingNextWorld == null) {
+            pregenerateNextWorld();
+        }
 
-        WorldCreator creator = new WorldCreator(worldName);
-        creator.seed(newSeed);
-        World newWorld = creator.createWorld();
+        World newWorld = pendingNextWorld;
+        pendingNextWorld = null;
 
         if (newWorld == null) {
             getServer().broadcast(Component.text("Что-то пошло не так при создании мира!"));
@@ -106,6 +129,47 @@ public final class Seedswitch extends JavaPlugin {
 
             player.teleport(newLocation);
         }
-        
+
+        // Старый мир больше не нужен — выгружаем и удаляем с диска
+        World worldToDelete = currentWorld;
+        currentWorld = newWorld;
+
+        if (worldToDelete != null && worldToDelete.getName().startsWith("seedswitch_")) {
+            deleteWorldLater(worldToDelete);
+        }
+    }
+
+    // Удаляем мир через 1 секунду (даём серверу время убедиться, что все точно телепортировались)
+    private void deleteWorldLater(World world) {
+        new BukkitRunnable() {
+            @Override
+            public void run() {
+                String worldName = world.getName();
+                boolean unloaded = Bukkit.unloadWorld(world, false);
+
+                if (unloaded) {
+                    File worldFolder = new File(Bukkit.getWorldContainer(), worldName);
+                    deleteFolder(worldFolder);
+                    getLogger().info("Deleted old world: " + worldName);
+                } else {
+                    getLogger().warning("Could not unload old world: " + worldName);
+                }
+            }
+        }.runTaskLater(this, 20L);
+    }
+
+    // Обычное рекурсивное удаление папки со всем содержимым
+    private void deleteFolder(File folder) {
+        File[] files = folder.listFiles();
+        if (files != null) {
+            for (File file : files) {
+                if (file.isDirectory()) {
+                    deleteFolder(file);
+                } else {
+                    file.delete();
+                }
+            }
+        }
+        folder.delete();
     }
 }
