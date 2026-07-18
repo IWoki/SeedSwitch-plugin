@@ -10,6 +10,8 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
+import net.kyori.adventure.text.format.NamedTextColor;
+import org.bukkit.Sound;
 
 import java.io.File;
 import java.util.Random;
@@ -44,8 +46,6 @@ public final class Seedswitch extends JavaPlugin {
             public void run() {
                 if (globalIntervalSeconds <= 0) return;
 
-                // Готовим следующий мир заранее, пока есть время до смены
-                // (например, за 5 секунд до нуля — этого обычно хватает на генерацию)
                 if (globalCountdown == 5 && pendingNextWorld == null) {
                     pregenerateNextWorld();
                 }
@@ -57,9 +57,15 @@ public final class Seedswitch extends JavaPlugin {
                     globalCountdown = globalIntervalSeconds;
                 }
 
-                Component actionBarText = Component.text("Смена мира через: " + globalCountdown + "с");
+                Component actionBarText = Component.text("Смена мира через: " + globalCountdown + "с")
+                        .color(NamedTextColor.DARK_RED);
+
                 for (Player p : getServer().getOnlinePlayers()) {
                     p.sendActionBar(actionBarText);
+
+                    if (globalCountdown > 0 && globalCountdown <= 5) {
+                        p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 1.0f, 0.7071f);
+                    }
                 }
             }
         }.runTaskTimer(this, 0L, 20L);
@@ -128,6 +134,7 @@ public final class Seedswitch extends JavaPlugin {
             Location newLocation = new Location(newWorld, x, safeY, z);
 
             player.teleport(newLocation);
+            player.playSound(player.getLocation(), Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 1.0f, 1.0f);
         }
 
         // Старый мир больше не нужен — выгружаем и удаляем с диска
