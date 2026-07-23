@@ -6,5 +6,5 @@ load: POSTWORLD
 
 commands:
   seedswitch:
-    description: Телепортирует тебя в новый мир со случайным сидом
-    usage: /seedswitch
+    description: Управление автоматической сменой сида
+    usage: /seedswitch <settimer <секунды>|off>
