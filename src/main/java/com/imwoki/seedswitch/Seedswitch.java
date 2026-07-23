@@ -200,7 +200,7 @@ public final class Seedswitch extends JavaPlugin implements Listener {
             public void run() {
                 if (globalIntervalSeconds <= 0) return;
 
-                if (globalCountdown == 7 && pendingWorlds.isEmpty()) {
+                if (globalCountdown == 15 && pendingWorlds.isEmpty()) {
                     pregenerateNextWorlds();
                 }
 
