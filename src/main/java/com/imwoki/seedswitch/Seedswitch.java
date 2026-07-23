@@ -15,38 +15,43 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerPortalEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
+import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
 
 import java.io.File;
+import java.util.EnumMap;
+import java.util.HashSet;
+import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 
 public final class Seedswitch extends JavaPlugin implements Listener {
 
     private int globalIntervalSeconds = 0;
     private int globalCountdown = 0;
 
-    private World currentOverworld;
-    private World currentNether;
-    private World currentEnd;
+    // Текущие загруженные миры: измерение -> мир. Не обязательно все три сразу!
+    private final Map<Environment, World> currentWorlds = new EnumMap<>(Environment.class);
+    private long currentSeed;
+    private String currentBaseName;
 
-    private World pendingOverworld;
-    private World pendingNether;
-    private World pendingEnd;
+    // Подготовленные заранее миры для следующей смены (тоже не обязательно все три)
+    private final Map<Environment, World> pendingWorlds = new EnumMap<>(Environment.class);
+    private long pendingSeed;
+    private String pendingBaseName;
 
     @Override
     public void onEnable() {
         getLogger().info("SeedSwitch enabled!");
 
         for (World world : getServer().getWorlds()) {
-            switch (world.getEnvironment()) {
-                case NORMAL -> currentOverworld = world;
-                case NETHER -> currentNether = world;
-                case THE_END -> currentEnd = world;
-                default -> {}
-            }
+            currentWorlds.put(world.getEnvironment(), world);
         }
+        currentSeed = currentWorlds.get(Environment.NORMAL).getSeed();
+        currentBaseName = null; // дефолтные миры сервера, у них нет нашего префикса
 
         getServer().getPluginManager().registerEvents(this, this);
         startGlobalTicker();
@@ -57,29 +62,52 @@ public final class Seedswitch extends JavaPlugin implements Listener {
         getLogger().info("SeedSwitch disabled.");
     }
 
-    // Игрок зашёл на сервер — проверяем, что он в АКТУАЛЬНОМ мире, а не в удалённом старом
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
         Player player = event.getPlayer();
-        World playerWorld = player.getWorld();
-
-        boolean isInCurrentWorld = playerWorld.equals(currentOverworld)
-                || playerWorld.equals(currentNether)
-                || playerWorld.equals(currentEnd);
-
-        if (!isInCurrentWorld) {
-            // Его старый мир, скорее всего, был удалён — переносим в актуальный overworld
+        if (!currentWorlds.containsValue(player.getWorld())) {
+            World overworld = currentWorlds.get(Environment.NORMAL);
             Location loc = player.getLocation();
-            int safeY = findSafeY(currentOverworld, (int) loc.getX(), (int) loc.getZ());
-            player.teleport(new Location(currentOverworld, loc.getX(), safeY, loc.getZ()));
+            int safeY = findSafeY(overworld, (int) loc.getX(), (int) loc.getZ());
+            player.teleport(new Location(overworld, loc.getX(), safeY, loc.getZ()));
         }
     }
 
-    // Игрок умер — respawn делаем именно в том сиде, где он умер
     @EventHandler
     public void onPlayerRespawn(PlayerRespawnEvent event) {
-        Location spawnLocation = currentOverworld.getSpawnLocation();
-        event.setRespawnLocation(spawnLocation);
+        World overworld = currentWorlds.get(Environment.NORMAL);
+        event.setRespawnLocation(overworld.getSpawnLocation());
+    }
+
+    // Игрок зашёл в портал — если нужного измерения ещё нет, генерируем его прямо сейчас
+    @EventHandler
+    public void onPlayerPortal(PlayerPortalEvent event) {
+        Environment fromEnv = event.getFrom().getWorld().getEnvironment();
+        Environment targetEnv = resolveTargetEnvironment(fromEnv, event.getCause());
+
+        World targetWorld = currentWorlds.get(targetEnv);
+        if (targetWorld == null) {
+            // Это измерение ещё не было нужно — создаём его сейчас, с текущим сидом
+            targetWorld = createWorldFor(targetEnv, currentBaseName, currentSeed);
+            currentWorlds.put(targetEnv, targetWorld);
+            getLogger().info("Lazily generated dimension: " + targetEnv);
+        }
+
+        double x = event.getFrom().getX();
+        double z = event.getFrom().getZ();
+        int safeY = findSafeY(targetWorld, (int) x, (int) z);
+        event.setTo(new Location(targetWorld, x, safeY, z));
+    }
+
+    // Определяет, в какое измерение ведёт портал, из которого сейчас входит игрок
+    private Environment resolveTargetEnvironment(Environment from, PlayerTeleportEvent.TeleportCause cause) {
+        if (cause == PlayerTeleportEvent.TeleportCause.NETHER_PORTAL) {
+            return from == Environment.NETHER ? Environment.NORMAL : Environment.NETHER;
+        }
+        if (cause == PlayerTeleportEvent.TeleportCause.END_PORTAL) {
+            return from == Environment.THE_END ? Environment.NORMAL : Environment.THE_END;
+        }
+        return Environment.NORMAL;
     }
 
     private void startGlobalTicker() {
@@ -88,7 +116,7 @@ public final class Seedswitch extends JavaPlugin implements Listener {
             public void run() {
                 if (globalIntervalSeconds <= 0) return;
 
-                if (globalCountdown == 10 && pendingOverworld == null) {
+                if (globalCountdown == 7 && pendingWorlds.isEmpty()) {
                     pregenerateNextWorlds();
                 }
 
@@ -113,23 +141,40 @@ public final class Seedswitch extends JavaPlugin implements Listener {
         }.runTaskTimer(this, 0L, 20L);
     }
 
+    // Генерирует ТОЛЬКО те измерения, где реально есть онлайн-игроки прямо сейчас
     private void pregenerateNextWorlds() {
-        long newSeed = new Random().nextLong();
-        String baseName = "seedswitch_" + System.currentTimeMillis();
+        pendingSeed = new Random().nextLong();
+        pendingBaseName = "seedswitch_" + System.currentTimeMillis();
+        pendingWorlds.clear();
 
-        pendingOverworld = new WorldCreator(baseName + "_overworld")
-                .environment(Environment.NORMAL)
-                .seed(newSeed)
-                .createWorld();
+        Set<Environment> occupied = new HashSet<>();
+        for (Player p : getServer().getOnlinePlayers()) {
+            occupied.add(p.getWorld().getEnvironment());
+        }
+        if (occupied.isEmpty()) {
+            occupied.add(Environment.NORMAL); // подстраховка, если вдруг никого нет онлайн
+        }
 
-        pendingNether = new WorldCreator(baseName + "_nether")
-                .environment(Environment.NETHER)
-                .seed(newSeed)
-                .createWorld();
+        for (Environment env : occupied) {
+            World world = createWorldFor(env, pendingBaseName, pendingSeed);
+            pendingWorlds.put(env, world);
+        }
+    }
 
-        pendingEnd = new WorldCreator(baseName + "_end")
-                .environment(Environment.THE_END)
-                .seed(newSeed)
+    // Создаёт мир нужного измерения с нужным именем и сидом
+    private World createWorldFor(String baseNameOrNull, Environment env, long seed) {
+        return createWorldFor(env, baseNameOrNull, seed);
+    }
+
+    private World createWorldFor(Environment env, String baseName, long seed) {
+        String suffix = switch (env) {
+            case NETHER -> "_nether";
+            case THE_END -> "_end";
+            default -> "_overworld";
+        };
+        return new WorldCreator(baseName + suffix)
+                .environment(env)
+                .seed(seed)
                 .createWorld();
     }
 
@@ -163,32 +208,24 @@ public final class Seedswitch extends JavaPlugin implements Listener {
     }
 
     private void switchAllPlayers() {
-        if (pendingOverworld == null) {
+        if (pendingWorlds.isEmpty()) {
             pregenerateNextWorlds();
         }
 
-        World newOverworld = pendingOverworld;
-        World newNether = pendingNether;
-        World newEnd = pendingEnd;
-        pendingOverworld = null;
-        pendingNether = null;
-        pendingEnd = null;
-
-        if (newOverworld == null || newNether == null || newEnd == null) {
-            getServer().broadcast(Component.text("Что-то пошло не так при создании миров!"));
-            return;
-        }
+        Map<Environment, World> newWorlds = new EnumMap<>(pendingWorlds);
+        long newSeed = pendingSeed;
+        String newBaseName = pendingBaseName;
+        pendingWorlds.clear();
 
         for (Player player : getServer().getOnlinePlayers()) {
+            Environment env = player.getWorld().getEnvironment();
+
+            // На случай если игрок как-то оказался в измерении, которое мы не подготовили
+            World targetWorld = newWorlds.computeIfAbsent(env, e -> createWorldFor(e, newBaseName, newSeed));
+
             Location oldLocation = player.getLocation();
             double x = oldLocation.getX();
             double z = oldLocation.getZ();
-
-            World targetWorld = switch (player.getWorld().getEnvironment()) {
-                case NETHER -> newNether;
-                case THE_END -> newEnd;
-                default -> newOverworld;
-            };
 
             int safeY = findSafeY(targetWorld, (int) x, (int) z);
             Location newLocation = new Location(targetWorld, x, safeY, z);
@@ -197,16 +234,19 @@ public final class Seedswitch extends JavaPlugin implements Listener {
             player.playSound(player.getLocation(), Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 1.0f, 1.0f);
         }
 
-        deleteWorldLater(currentOverworld);
-        deleteWorldLater(currentNether);
-        deleteWorldLater(currentEnd);
+        getServer().broadcast(Component.text("Мир сменился! сид: " + newSeed));
 
-        currentOverworld = newOverworld;
-        currentNether = newNether;
-        currentEnd = newEnd;
+        // Удаляем ВСЕ старые миры, какие бы измерения ни были загружены
+        for (World oldWorld : currentWorlds.values()) {
+            deleteWorldLater(oldWorld);
+        }
+
+        currentWorlds.clear();
+        currentWorlds.putAll(newWorlds);
+        currentSeed = newSeed;
+        currentBaseName = newBaseName;
     }
 
-    // Ищет безопасную высоту.
     private int findSafeY(World world, int x, int z) {
         int minY = world.getMinHeight();
         int maxY = world.getMaxHeight() - 2;
@@ -229,7 +269,7 @@ public final class Seedswitch extends JavaPlugin implements Listener {
     }
 
     private void deleteWorldLater(World world) {
-        if (world == null || !world.getName().startsWith("seedswitch_")) return;
+        if (world == null || world.getName() == null || !world.getName().startsWith("seedswitch_")) return;
 
         new BukkitRunnable() {
             @Override
@@ -239,26 +279,55 @@ public final class Seedswitch extends JavaPlugin implements Listener {
 
                 if (unloaded) {
                     File worldFolder = new File(Bukkit.getWorldContainer(), worldName);
-                    deleteFolder(worldFolder);
-                    getLogger().info("Deleted old world: " + worldName);
+                    attemptDeleteFolder(worldFolder, worldName, 0);
                 } else {
                     getLogger().warning("Could not unload old world: " + worldName);
                 }
             }
-        }.runTaskLater(this, 60L); // 3 секунды задержки
+        }.runTaskLater(this, 20L);
     }
 
-    private void deleteFolder(File folder) {
+    private void attemptDeleteFolder(File folder, String worldName, int attempt) {
+        boolean success = deleteFolder(folder);
+
+        if (success) {
+            getLogger().info("Deleted old world: " + worldName);
+            return;
+        }
+
+        if (attempt >= 5) {
+            getLogger().warning("Failed to delete world after 5 attempts: " + worldName);
+            return;
+        }
+
+        new BukkitRunnable() {
+            @Override
+            public void run() {
+                attemptDeleteFolder(folder, worldName, attempt + 1);
+            }
+        }.runTaskLater(this, 40L);
+    }
+
+    private boolean deleteFolder(File folder) {
         File[] files = folder.listFiles();
+        boolean allDeleted = true;
+
         if (files != null) {
             for (File file : files) {
                 if (file.isDirectory()) {
-                    deleteFolder(file);
+                    allDeleted &= deleteFolder(file);
                 } else {
-                    file.delete();
+                    if (!file.delete()) {
+                        allDeleted = false;
+                    }
                 }
             }
         }
-        folder.delete();
+
+        if (allDeleted) {
+            allDeleted = folder.delete();
+        }
+
+        return allDeleted;
     }
 }
