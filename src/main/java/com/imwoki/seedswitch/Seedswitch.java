@@ -70,11 +70,13 @@ public final class Seedswitch extends JavaPlugin implements Listener {
 
             currentSeed = config.getLong("seed");
             currentBaseName = config.getString("baseName");
+            long savedTime = config.getLong("time", 0L);
             List<String> dimensionNames = config.getStringList("dimensions");
 
             for (String dimName : dimensionNames) {
                 Environment env = Environment.valueOf(dimName);
                 World world = createWorldFor(env, currentBaseName, currentSeed);
+                world.setTime(savedTime);
                 currentWorlds.put(env, world);
             }
 
@@ -98,6 +100,12 @@ public final class Seedswitch extends JavaPlugin implements Listener {
         YamlConfiguration config = new YamlConfiguration();
         config.set("seed", currentSeed);
         config.set("baseName", currentBaseName);
+
+        // Сохраняем время из overworld, иначе из любого другого измерения
+        World anyWorld = currentWorlds.containsKey(Environment.NORMAL)
+                ? currentWorlds.get(Environment.NORMAL)
+                : currentWorlds.values().iterator().next();
+        config.set("time", anyWorld.getTime());
 
         List<String> dimensionNames = new ArrayList<>();
         for (Environment env : currentWorlds.keySet()) {
@@ -142,8 +150,12 @@ public final class Seedswitch extends JavaPlugin implements Listener {
 
         World targetWorld = currentWorlds.get(targetEnv);
         if (targetWorld == null) {
-            // Это измерение ещё не было нужно — создаём его сейчас, с текущим сидом
             targetWorld = createWorldFor(targetEnv, currentBaseName, currentSeed);
+
+            // Берём время из любого уже загруженного измерения
+            long currentTime = currentWorlds.values().iterator().next().getTime();
+            targetWorld.setTime(currentTime);
+
             currentWorlds.put(targetEnv, targetWorld);
             saveCurrentState();
             getLogger().info("Lazily generated dimension: " + targetEnv);
@@ -268,16 +280,29 @@ public final class Seedswitch extends JavaPlugin implements Listener {
             pregenerateNextWorlds();
         }
 
+        // Запоминаем текущее время (день/ночь), чтобы перенести его в новые миры
+        long currentTime = currentWorlds.values().iterator().hasNext()
+                ? currentWorlds.values().iterator().next().getTime()
+                : 0L;
+
         Map<Environment, World> newWorlds = new EnumMap<>(pendingWorlds);
         long newSeed = pendingSeed;
         String newBaseName = pendingBaseName;
         pendingWorlds.clear();
 
+        // Выставляем сохранённое время всем подготовленным мирам
+        for (World world : newWorlds.values()) {
+            world.setTime(currentTime);
+        }
+
         for (Player player : getServer().getOnlinePlayers()) {
             Environment env = player.getWorld().getEnvironment();
 
-            // На случай если игрок как-то оказался в измерении, которое мы не подготовили
-            World targetWorld = newWorlds.computeIfAbsent(env, e -> createWorldFor(e, newBaseName, newSeed));
+            World targetWorld = newWorlds.computeIfAbsent(env, e -> {
+                World w = createWorldFor(e, newBaseName, newSeed);
+                w.setTime(currentTime); // и на случай "аварийной" генерации тоже
+                return w;
+            });
 
             Location oldLocation = player.getLocation();
             double x = oldLocation.getX();
@@ -290,9 +315,8 @@ public final class Seedswitch extends JavaPlugin implements Listener {
             player.playSound(player.getLocation(), Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 1.0f, 1.0f);
         }
 
-        getServer().broadcast(Component.text("Мир сменился! сид: " + newSeed));
+        getServer().broadcast(Component.text("Мир сменился! Новый сид: " + newSeed));
 
-        // Удаляем ВСЕ старые миры, какие бы измерения ни были загружены
         for (World oldWorld : currentWorlds.values()) {
             deleteWorldLater(oldWorld);
         }
