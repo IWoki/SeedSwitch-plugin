@@ -139,7 +139,13 @@ public final class Seedswitch extends JavaPlugin implements Listener {
     @EventHandler
     public void onPlayerRespawn(PlayerRespawnEvent event) {
         World overworld = currentWorlds.get(Environment.NORMAL);
-        event.setRespawnLocation(overworld.getSpawnLocation());
+        if (overworld == null) {
+            getLogger().warning("Overworld missing in currentWorlds during respawn! Falling back to any available world.");
+            overworld = currentWorlds.values().stream().findFirst().orElse(null);
+        }
+        if (overworld != null) {
+            event.setRespawnLocation(overworld.getSpawnLocation());
+        }
     }
 
     // Игрок зашёл в портал — если нужного измерения ещё нет, генерируем его прямо сейчас
@@ -151,20 +157,30 @@ public final class Seedswitch extends JavaPlugin implements Listener {
         World targetWorld = currentWorlds.get(targetEnv);
         if (targetWorld == null) {
             targetWorld = createWorldFor(targetEnv, currentBaseName, currentSeed);
-
-            // Берём время из любого уже загруженного измерения
             long currentTime = currentWorlds.values().iterator().next().getTime();
             targetWorld.setTime(currentTime);
-
             currentWorlds.put(targetEnv, targetWorld);
             saveCurrentState();
             getLogger().info("Lazily generated dimension: " + targetEnv);
         }
 
-        double x = event.getFrom().getX();
-        double z = event.getFrom().getZ();
-        int safeY = findSafeY(targetWorld, (int) x, (int) z);
-        event.setTo(new Location(targetWorld, x, safeY, z));
+        Location destination;
+
+        if (targetEnv == Environment.THE_END) {
+            // Вход в Энд — всегда на фиксированную платформу (как в ваниле), а не по X/Z игрока
+            destination = new Location(targetWorld, 100.5, 50, 0.5);
+        } else if (fromEnv == Environment.THE_END) {
+            // Выход ИЗ Энда — всегда на точку спавна мира (как в ваниле), а не по X/Z в Энде
+            destination = targetWorld.getSpawnLocation();
+        } else {
+            // Обычный портал Незера — переносим по тем же X/Z координатам
+            double x = event.getFrom().getX();
+            double z = event.getFrom().getZ();
+            int safeY = findSafeY(targetWorld, (int) x, (int) z);
+            destination = new Location(targetWorld, x, safeY, z);
+        }
+
+        event.setTo(destination);
     }
 
     // Определяет, в какое измерение ведёт портал, из которого сейчас входит игрок
@@ -219,9 +235,9 @@ public final class Seedswitch extends JavaPlugin implements Listener {
         for (Player p : getServer().getOnlinePlayers()) {
             occupied.add(p.getWorld().getEnvironment());
         }
-        if (occupied.isEmpty()) {
-            occupied.add(Environment.NORMAL); // подстраховка, если вдруг никого нет онлайн
-        }
+
+        // Overworld генерируем ВСЕГДА — он нужен как минимум для респавна после смерти
+        occupied.add(Environment.NORMAL);
 
         for (Environment env : occupied) {
             World world = createWorldFor(env, pendingBaseName, pendingSeed);
