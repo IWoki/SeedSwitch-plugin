@@ -20,6 +20,10 @@ import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
+import org.bukkit.configuration.file.YamlConfiguration;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 
 import java.io.File;
 import java.util.EnumMap;
@@ -32,6 +36,7 @@ public final class Seedswitch extends JavaPlugin implements Listener {
 
     private int globalIntervalSeconds = 0;
     private int globalCountdown = 0;
+    private File stateFile;
 
     // Текущие загруженные миры: измерение -> мир. Не обязательно все три сразу!
     private final Map<Environment, World> currentWorlds = new EnumMap<>(Environment.class);
@@ -47,14 +52,64 @@ public final class Seedswitch extends JavaPlugin implements Listener {
     public void onEnable() {
         getLogger().info("SeedSwitch enabled!");
 
-        for (World world : getServer().getWorlds()) {
-            currentWorlds.put(world.getEnvironment(), world);
+        if (!getDataFolder().exists()) {
+            getDataFolder().mkdirs();
         }
-        currentSeed = currentWorlds.get(Environment.NORMAL).getSeed();
-        currentBaseName = null; // дефолтные миры сервера, у них нет нашего префикса
+        stateFile = new File(getDataFolder(), "state.yml");
+
+        loadOrCreateCurrentWorlds();
 
         getServer().getPluginManager().registerEvents(this, this);
         startGlobalTicker();
+    }
+
+    // Загружает миры из сохранённого состояния, либо создаёт первую пару миров, если это самый первый запуск
+    private void loadOrCreateCurrentWorlds() {
+        if (stateFile.exists()) {
+            YamlConfiguration config = YamlConfiguration.loadConfiguration(stateFile);
+
+            currentSeed = config.getLong("seed");
+            currentBaseName = config.getString("baseName");
+            List<String> dimensionNames = config.getStringList("dimensions");
+
+            for (String dimName : dimensionNames) {
+                Environment env = Environment.valueOf(dimName);
+                World world = createWorldFor(env, currentBaseName, currentSeed);
+                currentWorlds.put(env, world);
+            }
+
+            getLogger().info("Restored previous seed from state.yml: " + currentSeed);
+        } else {
+            // Самый первый запуск за всю историю — создаём свою первую пару миров,
+            // дефолтный мир сервера (world/world_nether/world_the_end) больше не используем
+            currentSeed = new Random().nextLong();
+            currentBaseName = "seedswitch_" + System.currentTimeMillis();
+
+            World overworld = createWorldFor(Environment.NORMAL, currentBaseName, currentSeed);
+            currentWorlds.put(Environment.NORMAL, overworld);
+
+            saveCurrentState();
+            getLogger().info("First ever launch — generated initial world with seed: " + currentSeed);
+        }
+    }
+
+    // Сохраняет текущий сид/имя/список измерений в state.yml
+    private void saveCurrentState() {
+        YamlConfiguration config = new YamlConfiguration();
+        config.set("seed", currentSeed);
+        config.set("baseName", currentBaseName);
+
+        List<String> dimensionNames = new ArrayList<>();
+        for (Environment env : currentWorlds.keySet()) {
+            dimensionNames.add(env.name());
+        }
+        config.set("dimensions", dimensionNames);
+
+        try {
+            config.save(stateFile);
+        } catch (IOException e) {
+            getLogger().warning("Could not save state.yml: " + e.getMessage());
+        }
     }
 
     @Override
@@ -90,6 +145,7 @@ public final class Seedswitch extends JavaPlugin implements Listener {
             // Это измерение ещё не было нужно — создаём его сейчас, с текущим сидом
             targetWorld = createWorldFor(targetEnv, currentBaseName, currentSeed);
             currentWorlds.put(targetEnv, targetWorld);
+            saveCurrentState();
             getLogger().info("Lazily generated dimension: " + targetEnv);
         }
 
@@ -245,6 +301,7 @@ public final class Seedswitch extends JavaPlugin implements Listener {
         currentWorlds.putAll(newWorlds);
         currentSeed = newSeed;
         currentBaseName = newBaseName;
+        saveCurrentState();
     }
 
     private int findSafeY(World world, int x, int z) {
